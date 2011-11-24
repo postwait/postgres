@@ -21,6 +21,7 @@
 #include <arpa/inet.h>
 
 #include "access/xact.h"
+#include "access/hooks.h"
 #include "catalog/pg_proc.h"
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
@@ -333,6 +334,8 @@ HandleFunctionRequest(StringInfo msgBuf)
 		was_logged = true;
 	}
 
+	call_pre_exec_log_hooks(LOG_HOOK_CONTEXT_FASTPATH, fip->fname, NULL, was_logged);
+
 	/*
 	 * Check permission to access and call function.  Since we didn't go
 	 * through a normal name lookup, we need to check schema usage too.
@@ -416,6 +419,8 @@ HandleFunctionRequest(StringInfo msgBuf)
 							msec_str, fip->fname, fid)));
 			break;
 	}
+
+	call_post_exec_log_hooks(LOG_HOOK_CONTEXT_FASTPATH, fip->fname, NULL, was_logged);
 
 	return 0;
 }

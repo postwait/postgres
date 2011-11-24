@@ -42,6 +42,7 @@
 
 #include "access/printtup.h"
 #include "access/xact.h"
+#include "access/hooks.h"
 #include "catalog/pg_type.h"
 #include "commands/async.h"
 #include "commands/prepare.h"
@@ -110,6 +111,56 @@ int			PostAuthDelay = 0;
  *		private variables
  * ----------------
  */
+
+/* a list of hooks for pre and post execution logging */
+static List *pre_exec_log_hooks = NULL;
+static List *post_exec_log_hooks = NULL;
+
+void	register_pre_exec_log_hook(pre_exec_log_hook_t f) {
+	MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+	pre_exec_log_hooks = list_append_unique(pre_exec_log_hooks, f);
+	MemoryContextSwitchTo(oldcontext);
+}
+
+void	register_post_exec_log_hook(post_exec_log_hook_t f) {
+	MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+	post_exec_log_hooks = list_append_unique(post_exec_log_hooks, f);
+	MemoryContextSwitchTo(oldcontext);
+}
+
+void	call_pre_exec_log_hooks(LogHookContext ctx, const char *query,
+					List *tree, bool was_logged)
+{
+	if(list_length(pre_exec_log_hooks) > 0)
+	{
+		ListCell   *prelog_item;
+		foreach(prelog_item, pre_exec_log_hooks)
+		{
+			pre_exec_log_hook_t prelog = (pre_exec_log_hook_t)lfirst(prelog_item);
+			prelog(ctx, query, tree, was_logged);
+		}
+	}
+}
+
+void	call_post_exec_log_hooks(LogHookContext ctx, const char *query,
+					List *tree, bool was_logged)
+{
+	if(list_length(post_exec_log_hooks) > 0)
+	{
+		ListCell *postlog_item;
+		long secs, usecs;
+		int usecs_part;
+		TimestampDifference(GetCurrentStatementStartTimestamp(),
+							GetCurrentTimestamp(),
+							&secs, &usecs_part);
+		usecs = secs * 1000000 + usecs_part;
+		foreach(postlog_item, post_exec_log_hooks)
+		{
+			post_exec_log_hook_t postlog = (post_exec_log_hook_t)lfirst(postlog_item);
+			postlog(LOG_HOOK_CONTEXT_SIMPLE, query, tree, was_logged, usecs);
+		}
+	}
+}
 
 /* max_stack_depth converted to bytes for speed of checking */
 static long max_stack_depth_bytes = 100 * 1024L;
@@ -859,6 +910,12 @@ exec_simple_query(const char *query_string)
 	}
 
 	/*
+	 * Run all pre-exec log hooks.
+	 */
+	call_pre_exec_log_hooks(LOG_HOOK_CONTEXT_SIMPLE, query_string,
+				parsetree_list, was_logged);
+
+	/*
 	 * Switch back to transaction context to enter the loop.
 	 */
 	MemoryContextSwitchTo(oldcontext);
@@ -1092,6 +1149,13 @@ exec_simple_query(const char *query_string)
 					 errdetail_execute(parsetree_list)));
 			break;
 	}
+
+	/*
+	 * Run all post-exec log hooks.
+	 */
+	call_post_exec_log_hooks(LOG_HOOK_CONTEXT_SIMPLE, query_string,
+					parsetree_list, was_logged);
+
 
 	if (save_log_statement_stats)
 		ShowUsage("QUERY STATISTICS");
@@ -1358,6 +1422,12 @@ exec_parse_message(const char *query_string,	/* string to execute */
 					 errhidestmt(true)));
 			break;
 	}
+
+	/*
+	 * Run all post-exec log hooks.
+	 */
+	call_post_exec_log_hooks(LOG_HOOK_CONTEXT_EXEC_PARSE, query_string,
+					querytree_list, false);
 
 	if (save_log_statement_stats)
 		ShowUsage("PARSE MESSAGE STATISTICS");
@@ -1739,6 +1809,12 @@ exec_bind_message(StringInfo input_message)
 			break;
 	}
 
+	/*
+	 * Run all post-exec log hooks.
+	 */
+	call_post_exec_log_hooks(LOG_HOOK_CONTEXT_BIND, psrc->query_string,
+					portal->stmts, false);
+
 	if (save_log_statement_stats)
 		ShowUsage("BIND MESSAGE STATISTICS");
 
@@ -1875,6 +1951,12 @@ exec_execute_message(const char *portal_name, long max_rows)
 	}
 
 	/*
+	 * Run all pre-exec log hooks.
+	 */
+	call_pre_exec_log_hooks(LOG_HOOK_CONTEXT_PORTAL, sourceText,
+				portal->stmts, was_logged);
+
+	/*
 	 * If we are in aborted transaction state, the only portals we can
 	 * actually run are those containing COMMIT or ROLLBACK commands.
 	 */
@@ -1957,6 +2039,25 @@ exec_execute_message(const char *portal_name, long max_rows)
 					 errhidestmt(true),
 					 errdetail_params(portalParams)));
 			break;
+	}
+
+	/*
+	 * Run all post-exec log hooks.
+	 */
+	if(list_length(post_exec_log_hooks) > 0)
+	{
+		ListCell *postlog_item;
+		long secs, usecs;
+		int usecs_part;
+		TimestampDifference(GetCurrentStatementStartTimestamp(),
+							GetCurrentTimestamp(),
+							&secs, &usecs_part);
+		usecs = secs * 1000000 + usecs_part;
+		foreach(postlog_item, post_exec_log_hooks)
+		{
+			post_exec_log_hook_t postlog = (post_exec_log_hook_t)postlog_item;
+			postlog(LOG_HOOK_CONTEXT_PORTAL, sourceText, portal->stmts, false, usecs);
+		}
 	}
 
 	if (save_log_statement_stats)
