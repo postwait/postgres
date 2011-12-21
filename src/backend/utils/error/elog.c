@@ -82,6 +82,27 @@
 #undef _
 #define _(x) err_gettext(x)
 
+static List *elog_hooks = NULL;
+
+void	register_elog_hook(elog_hook_t f) {
+	MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+	elog_hooks = list_append_unique(elog_hooks, f);
+	MemoryContextSwitchTo(oldcontext);
+}
+
+void	call_elog_hooks(ErrorData *data)
+{
+	if(list_length(elog_hooks) > 0)
+	{
+		ListCell   *elog_item;
+		foreach(elog_item, elog_hooks)
+		{
+			elog_hook_t elog_hook = (elog_hook_t)lfirst(elog_item);
+			elog_hook(data);
+		}
+	}
+}
+
 static const char *
 err_gettext(const char *str)
 /* This extension allows gcc to check the format string for consistency with
@@ -396,6 +417,11 @@ errfinish(int dummy,...)
 		 econtext != NULL;
 		 econtext = econtext->previous)
 		(*econtext->callback) (econtext->arg);
+
+	/*
+	 * Hook elog output data for external consumption
+	 */
+	call_elog_hooks(edata);
 
 	/*
 	 * If ERROR (not more nor less) we pass it off to the current handler.

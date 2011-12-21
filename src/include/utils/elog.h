@@ -374,4 +374,16 @@ write_stderr(const char *fmt,...)
    the supplied arguments. */
 __attribute__((format(PG_PRINTF_ATTRIBUTE, 1, 2)));
 
+typedef void (*elog_hook_t)(ErrorData *data);
+/*
+ * These functions can be used by modules authors to instrument the
+ * logging process and do arbitrary pre-flight and post-flight logging
+ * of statements.
+ */
+extern void register_elog_hook(elog_hook_t f);
+/*
+ * Call the hooks
+ */
+extern void call_elog_hooks(ErrorData *data);
+
 #endif   /* ELOG_H */
