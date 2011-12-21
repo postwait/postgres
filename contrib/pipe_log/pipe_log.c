@@ -14,6 +14,7 @@
 #include "port.h"
 #include "utils/guc.h"
 #include "utils/timestamp.h"
+#include "utils/elog.h"
 #include "access/hooks.h"
 
 #include <unistd.h>
@@ -35,7 +36,7 @@ static int	pipe_fd = -1;
  * Check authentication
  */
 static void
-initalize_pipe(const char *filename)
+initialize_pipe(const char *filename)
 {
   int rv;
   struct stat sb;
@@ -67,12 +68,35 @@ initalize_pipe(const char *filename)
   }
 }
 
+#define MAX_LEN 32768
+static void
+pipe_elog(ErrorData *data)
+{
+  int qlen = data->message ? strlen(data->message) : 0;
+  int len = 0;
+  int dur = 0;
+  struct iovec lb[3] =
+      { { (char *)&len, sizeof(len) },
+        { (char *)&dur, sizeof(dur) },
+        { (char *)data->message, MAX_LEN - sizeof(len) - sizeof(dur) } };
+
+  if(qlen == 0) return;
+  initialize_pipe(pipe_filename);
+  if(pipe_fd < 0) return;
+  if(qlen < MAX_LEN - sizeof(len) - sizeof(dur))
+    lb[2].iov_len = qlen;
+  if(writev(pipe_fd, lb, 3) < 0) {
+    if(errno == EINTR || errno == EAGAIN) return;
+    close(pipe_fd);
+    pipe_fd = -1;
+  }
+
+}
 static void
 pipe_post_log(LogHookContext ctx, const char *query,
 			List *parsetree, bool was_logged, long usec_duration)
 {
-#define MAX_LEN 32768
-  initalize_pipe(pipe_filename);
+  initialize_pipe(pipe_filename);
   if(pipe_fd < 0) return;
   if(query) {
     int qlen = strlen(query);
@@ -104,7 +128,8 @@ _PG_init(void)
 							NULL, &pipe_filename, NULL,
 							PGC_SIGHUP, 0, NULL, NULL, NULL);
 
-  initalize_pipe(pipe_filename);
+  initialize_pipe(pipe_filename);
 	/* Install Hooks */
 	register_post_exec_log_hook(pipe_post_log);
+	register_elog_hook(pipe_elog);
 }
